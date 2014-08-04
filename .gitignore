@@ -1,0 +1,4 @@
+*.o
+pulsecron
+run.*
+rc.lua
