@@ -1,46 +1,21 @@
---
--- nawm is trivial wrapper around awesome-client
--- #!/bin/bash
--- echo "${*}" |DISPLAY=:0.0 awesome-client >/dev/null 2>&1
---
-init = function()
-    os.execute(string.format('%s', "nawm " .. "'volume.update_sinks()'"))
-    os.execute(string.format('%s', "nawm " .. "'volume.update_inputs()'"))
-end
-
-server =
-{
-    any = function()
-        os.execute(string.format('%s', "nawm " .. "'volume.update_sinks()'"))
-        os.execute(string.format('%s', "nawm " .. "'volume.update_inputs()'"))
-    end
-}
-
-sink =
-{
-    any = function()
-        os.execute(string.format('%s', "nawm " .. "'volume.update_sinks()'"))
-    end
-}
+pa = require("pulseaudio") -- lua bindings to pulseaudio — https://github.com/liaonau/lua-pulseaudio
 
 sink_input =
 {
+    -- move every new input to default sink
     new = function()
-        os.execute("pa_switch " .. 'true')
-    end,
-    any = function()
-        os.execute(string.format('%s', "nawm " .. "'volume.update_inputs()'"))
-    end
-}
+        local default = nil
+        for i, s in pairs(pa:get_sinks()) do
+            if (s.default) then
+                default = s
+                break
+            end
+        end
 
---any =
---{
-    --any = function(t, o)
-        --if (t ~= 'client') then
-            --os.execute(string.format('%s', "nawm " .. "'naughty.notify({title=\""..t.."\", text= \""..o.."\"})'"))
-            --os.execute(string.format('%s', "nawm " .. "'volume.update_sinks()'"))
-            --os.execute("notify-send -t 1 'hello'")
-        --end
-    --end
---}
--- vim: ft=lua
+        for i, input in pairs(pa:get_sink_inputs()) do
+            if (input.sink ~= default.index) then
+                pa:move_sink_input(input.index, default.index)
+            end
+        end
+    end,
+}

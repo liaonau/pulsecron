@@ -1,10 +1,14 @@
-PKGS     = libpulse lua libxdg-basedir
+APPNAME  = pulsecron
+
+CC       = clang
+
+PKGS     = libpulse lua5.1 libxdg-basedir libsystemd
 
 INCS    := $(shell pkg-config --cflags $(PKGS)) -I./
-CFLAGS  := -std=gnu99 -ggdb -W -Wall -Wextra -pedantic $(INCS) $(CFLAGS)
+CFLAGS  := -std=gnu18 -ggdb -W -Wall -Wextra -pedantic -O2 $(INCS) $(CFLAGS)
 
 LIBS    := $(shell pkg-config --libs $(PKGS))
-LDFLAGS := $(LIBS) $(LDFLAGS) -Wl,--export-dynamic
+LDFLAGS := $(LIBS) $(LDFLAGS) -Wl,--export-dynamic -lpthread
 
 SRCS  = $(wildcard *.c)
 HEADS = $(wildcard *.h)

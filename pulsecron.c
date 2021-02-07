@@ -1,21 +1,85 @@
-#define _GNU_SOURCE
-#define UNUSED __attribute__((unused))
-
-#include <stdbool.h>
+#ifndef APPNAME
+#define APPNAME "pulsecron"
+#endif
 
 #include <basedir_fs.h>
 #include <basedir.h>
-
-#include <pulse/pulseaudio.h>
-
-#include <lua.h>
-#include <lauxlib.h>
-#include <lualib.h>
-
+#include <stdbool.h>
 #include <string.h>
+#include <systemd/sd-bus.h>
 #include <unistd.h>
 
 #include "pulsecron.h"
+
+#define OBJECT_PATH    "/com/github/liaonau/"APPNAME
+#define INTERFACE_NAME "com.github.liaonau."APPNAME
+#define SIGNAL_NAME    "Changed"
+
+static const sd_bus_vtable vtable[] =
+{
+        SD_BUS_VTABLE_START(0),
+        SD_BUS_SIGNAL_WITH_NAMES(SIGNAL_NAME, "ssu", SD_BUS_PARAM(type) SD_BUS_PARAM(operation)  SD_BUS_PARAM(index), 0),
+        SD_BUS_VTABLE_END
+};
+
+static void* loop_dbus(void* userdata)
+{
+    pulseaudio_t* pulse = (pulseaudio_t*) userdata;
+    int r;
+    r = sd_bus_open_user(&pulse->bus);
+    if (r < 0)
+    {
+        fprintf(stderr, "Failed to connect to system bus: %s\n", strerror(-r));
+        goto fail;
+    }
+    r = sd_bus_add_object_vtable(pulse->bus, NULL, OBJECT_PATH, INTERFACE_NAME, vtable, NULL);
+    if (r < 0)
+    {
+        fprintf(stderr, "Failed to issue method call: %s\n", strerror(-r));
+        goto fail;
+    }
+    r = sd_bus_request_name(pulse->bus, INTERFACE_NAME, 0);
+    if (r < 0)
+    {
+        fprintf(stderr, "Failed to acquire service name: %s\n", strerror(-r));
+        goto fail;
+    }
+    for (;;)
+    {
+        pthread_mutex_lock(&pulse->lock);
+        r = sd_bus_process(pulse->bus, NULL);
+        if (r < 0)
+        {
+            fprintf(stderr, "Failed to process bus: %s\n", strerror(-r));
+            /*goto fail;*/
+        }
+        if (r > 0)
+        {
+            pthread_mutex_unlock(&pulse->lock);
+            continue;
+        }
+        pthread_mutex_unlock(&pulse->lock);
+        r = sd_bus_wait(pulse->bus, (uint64_t) -1);
+        if (r < 0)
+        {
+            fprintf(stderr, "Failed to wait on bus: %s\n", strerror(-r));
+            /*return NULL;*/
+            /*goto fail;*/
+        }
+        usleep(500);
+    }
+fail:
+    sd_bus_unref(pulse->bus);
+    pthread_exit(NULL);
+}
+
+static int emit(pulseaudio_t* pulse, const char* type, const char* operation, uint32_t idx)
+{
+    pthread_mutex_lock(&pulse->lock);
+    int ret = sd_bus_emit_signal(pulse->bus, OBJECT_PATH, INTERFACE_NAME, SIGNAL_NAME, "ssu", type, operation, idx);
+    pthread_mutex_unlock(&pulse->lock);
+    return ret;
+}
 
 inline static void async_wait(pulseaudio_t* pulse, pa_operation* op)
 {
@@ -62,6 +126,7 @@ static void connect_state_cb(pa_context *context, void *userdata)
     case PA_CONTEXT_READY:
         pulse->connected = 1;
         try_init_call(pulse->L);
+        emit(pulse, "init", "", 0);
         pa_threaded_mainloop_signal(pulse->mainloop, 0);
         break;
     case PA_CONTEXT_FAILED:
@@ -137,19 +202,20 @@ static void try_call(lua_State* L, const char* type, const char* operation, cons
     lua_settop(L, top);
 }
 
-static void subscribe_cb(UNUSED pa_context* c, pa_subscription_event_type_t t, UNUSED uint32_t idx, void* userdata)
+static void subscribe_cb(UNUSED pa_context* c, pa_subscription_event_type_t t, uint32_t idx, void* userdata)
 {
     pulseaudio_t* pulse = (pulseaudio_t*) userdata;
     if (pulse->connected)
     {
-        lua_State* L = pulse->L;
-        const char* type = event_type(t);
+        lua_State*  L         = pulse->L;
+        const char* type      = event_type(t);
         const char* operation = event_operation(t);
 
         try_call(L, type , operation, type, operation);
         try_call(L, type , "any"    , type, operation);
         try_call(L, "any", operation, type, operation);
         try_call(L, "any", "any"    , type, operation);
+        emit(pulse, type, operation, idx);
     }
 }
 
@@ -194,7 +260,7 @@ static void pc_deinit(pulseaudio_t* pulse)
 static void pc_subscribe(pulseaudio_t* pulse)
 {
     pa_threaded_mainloop_lock(pulse->mainloop);
-    pa_operation* op = pa_context_subscribe(pulse->context, PA_SUBSCRIPTION_MASK_ALL, success_cb, (void*) pulse);
+    pa_operation* op = pa_context_subscribe(pulse->context, PA_SUBSCRIPTION_MASK_ALL & ~PA_SUBSCRIPTION_MASK_CLIENT, success_cb, (void*) pulse);
     async_wait(pulse, op);
 
     pa_context_set_subscribe_callback(pulse->context, subscribe_cb, (void*) pulse);
@@ -265,15 +331,22 @@ static bool lua_loadrc(pulseaudio_t* pulse)
     return true;
 }
 
-static inline void fatal(const char* m)
-{
-    fprintf(stderr, "%s\n", m);
-    exit(EXIT_FAILURE);
-}
-
 int main(UNUSED int argc, UNUSED char** argv)
 {
     pulseaudio_t pulse;
+
+    if (pthread_mutex_init(&pulse.lock, NULL) != 0)
+    {
+        fprintf(stderr, "mutex init has failed\n");
+        exit(1);
+    }
+    pthread_t thr;
+    int ret = pthread_create(&thr, NULL, loop_dbus, &pulse);
+    if (ret)
+    {
+        fprintf(stderr, "couldn't create DBus thread, signals won't be present\n");
+        exit(1);
+    }
 
     pulse.connected  = 0;
     pulse.subscribed = 0;
@@ -286,6 +359,7 @@ int main(UNUSED int argc, UNUSED char** argv)
         exit(EXIT_FAILURE);
 
     loop(&pulse);
+    pthread_mutex_destroy(&pulse.lock);
     return 0;
 }
 
